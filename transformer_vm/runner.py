@@ -87,6 +87,14 @@ _CPP_SOURCE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "model", 
 _CPP_BINARY = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "transformer")
 
 
+def _find_libomp_prefix():
+    """Find libomp install prefix on macOS (homebrew)."""
+    for prefix in ["/opt/homebrew/opt/libomp", "/usr/local/opt/libomp"]:
+        if os.path.isfile(os.path.join(prefix, "lib", "libomp.dylib")):
+            return prefix
+    return None
+
+
 def _build_cpp_engine():
     """Build the C++ inference engine if not already built."""
     binary = os.path.abspath(_CPP_BINARY)
@@ -99,6 +107,7 @@ def _build_cpp_engine():
     logger.info("[engine] Compiling C++ inference engine...")
     attn_dir = os.path.join(os.path.dirname(source), "..", "attention")
     if platform.system() == "Darwin":
+        omp_prefix = _find_libomp_prefix()
         cmd = [
             "clang++",
             "-std=c++17",
@@ -107,12 +116,15 @@ def _build_cpp_engine():
             "Accelerate",
             "-I",
             attn_dir,
-            source,
-            "-o",
-            binary,
         ]
+        if omp_prefix:
+            cmd += ["-Xclang", "-fopenmp",
+                    f"-I{omp_prefix}/include", f"-L{omp_prefix}/lib", "-lomp"]
+        cmd += [source, "-o", binary]
     else:
-        cmd = ["g++", "-std=c++17", "-O3", "-I", attn_dir, source, "-o", binary]
+        cmd = ["g++", "-std=c++17", "-O3", "-fopenmp",
+               "-I", attn_dir, source, "-o", binary,
+               "-lopenblas"]
     try:
         subprocess.check_call(cmd)
         logger.info("[engine] Built: %s", binary)
