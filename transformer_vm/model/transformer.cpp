@@ -72,6 +72,7 @@ struct Model {
     std::vector<std::vector<int>> attn_erase;
     std::vector<std::vector<int>> ffn_erase;
     std::vector<std::vector<TieBreak>> head_tb;
+    std::vector<std::vector<int>> head_type;  // 1 = passthrough, 0 = lookup
 };
 
 static void load(Model& m, const char* path) {
@@ -140,6 +141,20 @@ static void load(Model& m, const char* path) {
                 int32_t v;
                 fread(&v, 4, 1, f);
                 m.head_tb[l][h] = (v == 1) ? TieBreak::LATEST : TieBreak::AVERAGE;
+            }
+        }
+    }
+
+    int32_t has_ht = 0;
+    if (fread(&has_ht, 4, 1, f) == 1 && has_ht) {
+        m.head_type.resize(L);
+        int H = m.H;
+        for (int l = 0; l < L; l++) {
+            m.head_type[l].resize(H, 0);
+            for (int h = 0; h < H; h++) {
+                int32_t v;
+                fread(&v, 4, 1, f);
+                m.head_type[l][h] = v;
             }
         }
     }
@@ -459,7 +474,6 @@ int main(int argc, char** argv) {
     }
 
     // ── Batched verification: dgemm projections + sequential hull ────
-    // Save the last program's ids for the batched test
     if (total_tok > 0 && !brute && !last_ids.empty()) {
         int T = (int)last_ids.size();
         printf("\n── Batched verify (%d tokens) ──\n", T);
@@ -494,17 +508,42 @@ int main(int argc, char** argv) {
 #endif
             auto pb = Clock::now();
 
-            // Hull: one parallel region, each thread owns a subset of heads across ALL positions
-            // No barriers needed: head h's hull is independent of head h'.
+            // Attention: passthrough → V[t], gather → V[round(q)], hull → search.
             std::fill(HO.begin(), HO.end(), 0.0);
             int vseq_base = vseq;
             #pragma omp parallel for schedule(static)
             for (int h = 0; h < H; h++) {
-                TieBreak tb = (!m.head_tb.empty()) ? m.head_tb[l][h] : TieBreak::AVERAGE;
-                for (int t = 0; t < T; t++) {
-                    double *k = &QKV[t*3*D + D], *v = k + D, *q = &QKV[t*3*D];
-                    vhulls[l*H+h].insert(&k[h*2], &v[h*2], vseq_base + t);
-                    vhulls[l*H+h].query(&q[h*2], tb, &HO[t*D + h*2]);
+                int ht = (!m.head_type.empty()) ? m.head_type[l][h] : 0;
+                if (ht == 1) {
+                    // Passthrough: output = V[t].
+                    for (int t = 0; t < T; t++) {
+                        HO[t*D + h*2]     = QKV[t*3*D + 2*D + h*2];
+                        HO[t*D + h*2 + 1] = QKV[t*3*D + 2*D + h*2 + 1];
+                    }
+                } else if (ht == 2) {
+                    // Gather: position-keyed lookup. q_1d = qx / (HARD_K * sqrt(2) * 2).
+                    // But we don't know HARD_K here. Use the ratio:
+                    // score = qx*kx + qy*ky = qx*2s + qy*(-s²+ε)
+                    // Maximized at s = qx/qy (from d/ds = 2*qx - 2s*qy = 0).
+                    // So the gather index is round(qx / qy).
+                    for (int t = 0; t < T; t++) {
+                        double qx = QKV[t*3*D + h*2];
+                        double qy = QKV[t*3*D + h*2 + 1];
+                        int idx = (qy != 0.0) ? (int)std::round(qx / qy) : 0;
+                        if (idx < 0) idx = 0;
+                        if (idx >= T) idx = T - 1;
+                        if (idx > t) idx = t;  // causality
+                        HO[t*D + h*2]     = QKV[idx*3*D + 2*D + h*2];
+                        HO[t*D + h*2 + 1] = QKV[idx*3*D + 2*D + h*2 + 1];
+                    }
+                } else {
+                    // Lookup: use hull.
+                    TieBreak tb = (!m.head_tb.empty()) ? m.head_tb[l][h] : TieBreak::AVERAGE;
+                    for (int t = 0; t < T; t++) {
+                        double *k = &QKV[t*3*D + D], *v = k + D, *q = &QKV[t*3*D];
+                        vhulls[l*H+h].insert(&k[h*2], &v[h*2], vseq_base + t);
+                        vhulls[l*H+h].query(&q[h*2], tb, &HO[t*D + h*2]);
+                    }
                 }
             }
             vseq += T;
