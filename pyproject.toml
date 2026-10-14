@@ -12,7 +12,7 @@ dependencies = [
     "pulp>=3.3.0",
     "pybind11>=3.0.2",
     "pyyaml>=6.0.3",
-    "setuptools>=82.0.0",
+    "setuptools>=84.0.0",
     "torch>=2.10.0",
 ]
 
@@ -38,7 +38,7 @@ wasm-specialize = "transformer_vm.specialize:main"
 wasm-reference = "transformer_vm.wasm.reference:main"
 
 [build-system]
-requires = ["setuptools>=82.0.0"]
+requires = ["setuptools>=84.0.0"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
