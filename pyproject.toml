@@ -56,6 +56,14 @@ include = ["transformer_vm*"]
     "attention/CMakeLists.txt",
 ]
 
+[tool.uv]
+# lockfile-only security floors (not published metadata). numpy 2.5 needs python >= 3.12,
+# so 3.11 can only reach the 2.4.x fix.
+constraint-dependencies = [
+    "numpy>=2.4.5; python_full_version < '3.12'",
+    "numpy>=2.5.3; python_full_version >= '3.12'",
+]
+
 [tool.ruff]
 target-version = "py311"
 line-length = 100
